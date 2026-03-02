@@ -1,9 +1,8 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const Groq = require('groq-sdk');
 const circuitBreaker = require('./circuitBreaker');
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// This is the exact prompt we send to Claude
 const buildPrompt = (notification) => `
 You are a Notification Prioritization Engine.
 Analyze this notification and classify it.
@@ -27,12 +26,10 @@ Respond ONLY with valid JSON like this:
   "reasoning": "Security alert requires immediate attention"
 }`;
 
-// Wait for X milliseconds
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Fallback when AI is unavailable - uses keywords like your Round 1 project
 function fallbackClassification(notification) {
   console.log('Using fallback classification - AI unavailable');
 
@@ -40,7 +37,6 @@ function fallbackClassification(notification) {
   const type = notification.event_type?.toLowerCase();
   const message = notification.message?.toLowerCase();
 
-  // Critical or security related = NOW
   if (hint === 'critical' || 
       type?.includes('security') || 
       type?.includes('error') ||
@@ -55,7 +51,6 @@ function fallbackClassification(notification) {
     };
   }
 
-  // Marketing or promotional = NEVER
   if (hint === 'low' ||
       type?.includes('marketing') ||
       type?.includes('promo') ||
@@ -71,7 +66,6 @@ function fallbackClassification(notification) {
     };
   }
 
-  // Everything else = LATER
   return {
     classification: 'LATER',
     confidence: 0.5,
@@ -81,28 +75,22 @@ function fallbackClassification(notification) {
   };
 }
 
-// Try calling Claude with retries
-async function callClaudeWithRetry(notification, maxRetries = 3) {
+async function callGroqWithRetry(notification, maxRetries = 3) {
   let lastError;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`AI attempt ${attempt}/${maxRetries}...`);
 
-      const message = await client.messages.create({
-        model: 'claude-4-5-haiku-20251001',
+      const message = await client.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
         max_tokens: 256,
-        messages: [{ 
-          role: 'user', 
-          content: buildPrompt(notification) 
-        }]
+        messages: [{ role: 'user', content: buildPrompt(notification) }]
       });
 
-      // Parse Claude's response
-      const text = message.content[0].text.trim();
+      const text = message.choices[0].message.content.trim();
       const parsed = JSON.parse(text);
 
-      // Make sure classification is valid
       if (!['NOW', 'LATER', 'NEVER'].includes(parsed.classification)) {
         throw new Error('Invalid classification from AI');
       }
@@ -111,15 +99,13 @@ async function callClaudeWithRetry(notification, maxRetries = 3) {
         classification: parsed.classification,
         confidence: parsed.confidence || 0.8,
         reasoning: parsed.reasoning,
-        model: 'claude-3-5-haiku-20241022',
+        model: 'llama-3.1-8b-instant',
         is_fallback: false
       };
 
     } catch (error) {
       lastError = error;
       console.log(`AI attempt ${attempt} failed: ${error.message}`);
-
-      // Wait before retrying - 1s, 2s, 4s (exponential backoff)
       if (attempt < maxRetries) {
         await sleep(1000 * Math.pow(2, attempt - 1));
       }
@@ -129,16 +115,14 @@ async function callClaudeWithRetry(notification, maxRetries = 3) {
   throw lastError;
 }
 
-// Main function - this is what gets called from the pipeline
 async function classifyWithAI(notification) {
-  // Check circuit breaker first
   if (circuitBreaker.isOpen()) {
     console.log('Circuit breaker OPEN - skipping AI, using fallback');
     return fallbackClassification(notification);
   }
 
   try {
-    const result = await callClaudeWithRetry(notification);
+    const result = await callGroqWithRetry(notification);
     circuitBreaker.recordSuccess();
     console.log(`AI classified as ${result.classification} (${result.confidence} confidence)`);
     return result;
